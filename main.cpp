@@ -1,127 +1,160 @@
 #include <dlfcn.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <iostream>
-#include <vector>
-
-// Make sure this matches your ONNX Runtime version
 #include "onnxruntime_c_api.h"
 
-int main() {
-    // -------------------------------------------------------------------------
-    // 1. Dynamically load the ONNX Runtime library
-    // -------------------------------------------------------------------------
-    const char* lib_path = "libonnxruntime.1.22.0.dylib";  // or full path
-    void* handle = dlopen(lib_path, RTLD_NOW);
-    if (!handle) {
-        std::cerr << "Failed to load " << lib_path << ": " << dlerror() << std::endl;
-        return 1;
+// Global variables
+static void* g_handle = nullptr;
+static const OrtApi* g_ort_api = nullptr;
+static OrtEnv* g_env = nullptr;
+
+/**
+ * @brief Initializes the ONNX Runtime API and environment by loading the shared library
+ *        and creating a global OrtEnv if necessary.
+ *
+ * @param lib_path Path to the ONNX Runtime shared library (e.g. "libonnxruntime.dylib").
+ * @return True on success; false if any step fails.
+ */
+bool initRuntime(const char* lib_path) {
+    if (!g_handle) {
+        g_handle = dlopen(lib_path, RTLD_NOW);
+        if (!g_handle) {
+            std::cerr << "Failed to load " << lib_path << ": " << dlerror() << std::endl;
+            return false;
+        }
     }
 
-    // -------------------------------------------------------------------------
-    // 2. Get the symbol OrtGetApiBase, retrieve the OrtApi
-    // -------------------------------------------------------------------------
-    const OrtApiBase* (*OrtGetApiBase)();
-    *(void**)(&OrtGetApiBase) = dlsym(handle, "OrtGetApiBase");
-    if (!OrtGetApiBase) {
-        std::cerr << "Failed to locate OrtGetApiBase: " << dlerror() << std::endl;
-        dlclose(handle);
-        return 1;
+    // Retrieve OrtGetApiBase
+    if (!g_ort_api) {
+        const OrtApiBase* (*OrtGetApiBase)() = nullptr;
+        *(void**)(&OrtGetApiBase) = dlsym(g_handle, "OrtGetApiBase");
+        if (!OrtGetApiBase) {
+            std::cerr << "Failed to locate OrtGetApiBase: " << dlerror() << std::endl;
+            return false;
+        }
+        const OrtApiBase* api_base = OrtGetApiBase();
+        g_ort_api = api_base->GetApi(ORT_API_VERSION);
+        if (!g_ort_api) {
+            std::cerr << "Failed to retrieve OrtApi." << std::endl;
+            return false;
+        }
     }
 
-    const OrtApiBase* api_base = OrtGetApiBase();
-    const OrtApi* ort_api = api_base->GetApi(ORT_API_VERSION);
-    if (!ort_api) {
-        std::cerr << "Failed to retrieve OrtApi." << std::endl;
-        dlclose(handle);
-        return 1;
-    }
-
-    // -------------------------------------------------------------------------
-    // 3. Create an environment
-    // -------------------------------------------------------------------------
-    OrtEnv* env = nullptr;
-    {
-        OrtStatus* status = ort_api->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "sst2_env", &env);
+    // Create an environment if needed
+    if (!g_env) {
+        OrtStatus* status = g_ort_api->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "my_env", &g_env);
         if (status != nullptr) {
-            const char* msg = ort_api->GetErrorMessage(status);
-            std::cerr << "CreateEnv error: " << msg << std::endl;
-            ort_api->ReleaseStatus(status);
-            dlclose(handle);
-            return 1;
+            std::cerr << "CreateEnv error: " << g_ort_api->GetErrorMessage(status) << std::endl;
+            g_ort_api->ReleaseStatus(status);
+            return false;
         }
         std::cout << "Successfully created OrtEnv." << std::endl;
     }
 
-    // -------------------------------------------------------------------------
-    // 4. Create a session for the DistilBERT SST-2 model (model.onnx)
-    // -------------------------------------------------------------------------
-    const char* model_path = "model.onnx";  // rename if your file differs
-    OrtSessionOptions* session_options = nullptr;
-    {
-        OrtStatus* status = ort_api->CreateSessionOptions(&session_options);
-        if (status != nullptr) {
-            std::cerr << "CreateSessionOptions error: "
-                      << ort_api->GetErrorMessage(status) << std::endl;
-            ort_api->ReleaseStatus(status);
-            ort_api->ReleaseEnv(env);
-            dlclose(handle);
-            return 1;
-        }
+    return true; // success
+}
+
+/**
+ * @brief Creates a new ONNX Runtime session options object with graph optimizations
+ *        enabled.
+ *
+ * @return A pointer to the newly created OrtSessionOptions on success, or nullptr on failure.
+ */
+OrtSessionOptions* createSessionOptions() {
+    if (!g_ort_api) {
+        std::cerr << "createSessionOptions: g_ort_api is not initialized yet." << std::endl;
+        return nullptr;
     }
 
-    // Optionally set optimizations, threading, etc.
+    OrtSessionOptions* session_options = nullptr;
+    OrtStatus* status = g_ort_api->CreateSessionOptions(&session_options);
+    if (status != nullptr) {
+        std::cerr << "CreateSessionOptions error: "
+                  << g_ort_api->GetErrorMessage(status) << std::endl;
+        g_ort_api->ReleaseStatus(status);
+        return nullptr;
+    }
+
+    status = g_ort_api->SetSessionGraphOptimizationLevel(session_options, ORT_ENABLE_ALL);
+    if (status != nullptr) {
+        std::cerr << "SetSessionGraphOptimizationLevel error: "
+                  << g_ort_api->GetErrorMessage(status) << std::endl;
+        g_ort_api->ReleaseStatus(status);
+        return nullptr;
+    }
+
+    return session_options;
+}
+
+/**
+ * @brief Creates a new ONNX Runtime session with the given model path and session options.
+ *
+ * @param model_path The path to the ONNX model file.
+ * @param session_options A pointer to an existing OrtSessionOptions instance to configure the session.
+ * @return A pointer to the newly created OrtSession on success, or nullptr on failure.
+ */
+OrtSession* createSession(const char* model_path, OrtSessionOptions* session_options) {
+    if (!g_ort_api || !g_env) {
+        std::cerr << "createSession: g_ort_api/g_env not initialized." << std::endl;
+        return nullptr;
+    }
 
     OrtSession* session = nullptr;
-    {
-        OrtStatus* status = ort_api->CreateSession(env, model_path, session_options, &session);
-        if (status != nullptr) {
-            std::cerr << "CreateSession error: "
-                      << ort_api->GetErrorMessage(status) << std::endl;
-            ort_api->ReleaseStatus(status);
-            ort_api->ReleaseSessionOptions(session_options);
-            ort_api->ReleaseEnv(env);
-            dlclose(handle);
-            return 1;
-        }
-        std::cout << "Successfully created ONNX Runtime session." << std::endl;
+    OrtStatus* status = g_ort_api->CreateSession(g_env, model_path, session_options, &session);
+    if (status != nullptr) {
+        std::cerr << "CreateSession error: " << g_ort_api->GetErrorMessage(status) << std::endl;
+        g_ort_api->ReleaseStatus(status);
+        return nullptr;
+    }
+    std::cout << "Successfully created ONNX Runtime session." << std::endl;
+    return session;
+}
+
+/**
+ * @brief Runs inference on a given session, producing a vector of floats (logits) from
+ *        the provided input tensors.
+ *
+ * @param session Pointer to a valid OrtSession.
+ * @param input_ids A vector representing the token IDs of the input text (shape: [1, sequence_length]).
+ * @param attention_mask A vector representing the attention mask for the input (shape: [1, sequence_length]).
+ * @return A vector of floats containing the logits on success, or an empty vector if any error occurs.
+ */
+std::vector<float> runInference(
+    OrtSession* session,
+    const std::vector<int64_t>& input_ids,
+    const std::vector<int64_t>& attention_mask)
+{
+    std::vector<float> logits;  // will return this
+
+    if (!session) {
+        std::cerr << "runInference: session pointer is null." << std::endl;
+        return logits; // empty
+    }
+    if (!g_ort_api || !g_env) {
+        std::cerr << "runInference: global OrtApi or OrtEnv is invalid." << std::endl;
+        return logits; // empty
     }
 
-    // -------------------------------------------------------------------------
-    // 5. Hardcode the tokens for "I think this is wonderful"
-    //    input_ids = [101, 1045, 2228, 2023, 2003, 6919, 102]
-    //    attention_mask = [1, 1, 1, 1, 1, 1, 1]
-    // -------------------------------------------------------------------------
-    std::vector<int64_t> input_ids       = {101, 1045, 2228, 2023, 2003, 6919, 102};
-    std::vector<int64_t> attention_mask  = {   1,    1,    1,    1,    1,    1,   1};
-    std::vector<int64_t> input_shape     = {1, (int64_t)input_ids.size()}; // [1,7]
+    // Shape: [1, sequence_length]
+    std::vector<int64_t> input_shape = {1, static_cast<int64_t>(input_ids.size())};
 
-    // Create a CPU memory info
+    // 1. Create CPU memory info
     OrtMemoryInfo* memory_info = nullptr;
     {
-        OrtStatus* status = ort_api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &memory_info);
+        OrtStatus* status = g_ort_api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &memory_info);
         if (status != nullptr) {
-            std::cerr << "CreateCpuMemoryInfo failed: " << ort_api->GetErrorMessage(status) << std::endl;
-            ort_api->ReleaseStatus(status);
-            // Cleanup
-            ort_api->ReleaseSession(session);
-            ort_api->ReleaseSessionOptions(session_options);
-            ort_api->ReleaseEnv(env);
-            dlclose(handle);
-            return 1;
+            std::cerr << "CreateCpuMemoryInfo failed: "
+                      << g_ort_api->GetErrorMessage(status) << std::endl;
+            g_ort_api->ReleaseStatus(status);
+            return logits;
         }
     }
 
-    // -------------------------------------------------------------------------
-    // 6. Create OrtValues for input_ids and attention_mask
-    //    We use CreateTensorWithDataAsOrtValue since we have our own buffers.
-    // -------------------------------------------------------------------------
+    // 2. Create OrtValues for input_ids
     OrtValue* input_ids_ort = nullptr;
     {
-        OrtStatus* status = ort_api->CreateTensorWithDataAsOrtValue(
+        OrtStatus* status = g_ort_api->CreateTensorWithDataAsOrtValue(
             memory_info,
-            input_ids.data(),
+            (void*)input_ids.data(),
             input_ids.size() * sizeof(int64_t),
             input_shape.data(),
             input_shape.size(),
@@ -130,23 +163,19 @@ int main() {
         );
         if (status != nullptr) {
             std::cerr << "CreateTensorWithDataAsOrtValue for input_ids failed: "
-                      << ort_api->GetErrorMessage(status) << std::endl;
-            ort_api->ReleaseStatus(status);
-            // Cleanup
-            ort_api->ReleaseMemoryInfo(memory_info);
-            ort_api->ReleaseSession(session);
-            ort_api->ReleaseSessionOptions(session_options);
-            ort_api->ReleaseEnv(env);
-            dlclose(handle);
-            return 1;
+                      << g_ort_api->GetErrorMessage(status) << std::endl;
+            g_ort_api->ReleaseStatus(status);
+            g_ort_api->ReleaseMemoryInfo(memory_info);
+            return logits;
         }
     }
 
+    // 3. Create OrtValues for attention_mask
     OrtValue* attention_mask_ort = nullptr;
     {
-        OrtStatus* status = ort_api->CreateTensorWithDataAsOrtValue(
+        OrtStatus* status = g_ort_api->CreateTensorWithDataAsOrtValue(
             memory_info,
-            attention_mask.data(),
+            (void*)attention_mask.data(),
             attention_mask.size() * sizeof(int64_t),
             input_shape.data(),
             input_shape.size(),
@@ -155,94 +184,113 @@ int main() {
         );
         if (status != nullptr) {
             std::cerr << "CreateTensorWithDataAsOrtValue for attention_mask failed: "
-                      << ort_api->GetErrorMessage(status) << std::endl;
-            ort_api->ReleaseStatus(status);
-            // Cleanup
-            ort_api->ReleaseValue(input_ids_ort);
-            ort_api->ReleaseMemoryInfo(memory_info);
-            ort_api->ReleaseSession(session);
-            ort_api->ReleaseSessionOptions(session_options);
-            ort_api->ReleaseEnv(env);
-            dlclose(handle);
-            return 1;
+                      << g_ort_api->GetErrorMessage(status) << std::endl;
+            g_ort_api->ReleaseStatus(status);
+            g_ort_api->ReleaseValue(input_ids_ort);
+            g_ort_api->ReleaseMemoryInfo(memory_info);
+            return logits;
         }
     }
 
-    // -------------------------------------------------------------------------
-    // 7. Run the session (common DistilBERT input names: "input_ids", "attention_mask")
-    //    Check your ONNX model's actual input node names if these differ.
-    // -------------------------------------------------------------------------
+    // 4. Run the session
     const char* input_names[] = {"input_ids", "attention_mask"};
     const OrtValue* input_values[] = {input_ids_ort, attention_mask_ort};
-
-    // Usually the DistilBertForSequenceClassification output is named "logits"
     const char* output_names[] = {"logits"};
     OrtValue* output_tensor = nullptr;
 
     {
-        OrtStatus* status = ort_api->Run(
+        OrtStatus* status = g_ort_api->Run(
             session,
-            nullptr,        // Run options
+            nullptr,  // Run options
             input_names,
             input_values,
-            2,              // number of inputs
+            2,        // number of inputs
             output_names,
-            1,              // number of outputs
+            1,        // number of outputs
             &output_tensor
         );
         if (status != nullptr) {
-            std::cerr << "Session Run failed: " << ort_api->GetErrorMessage(status) << std::endl;
-            ort_api->ReleaseStatus(status);
+            std::cerr << "Session Run failed: " << g_ort_api->GetErrorMessage(status) << std::endl;
+            g_ort_api->ReleaseStatus(status);
             // Cleanup
-            ort_api->ReleaseValue(attention_mask_ort);
-            ort_api->ReleaseValue(input_ids_ort);
-            ort_api->ReleaseMemoryInfo(memory_info);
-            ort_api->ReleaseSession(session);
-            ort_api->ReleaseSessionOptions(session_options);
-            ort_api->ReleaseEnv(env);
-            dlclose(handle);
-            return 1;
+            g_ort_api->ReleaseValue(attention_mask_ort);
+            g_ort_api->ReleaseValue(input_ids_ort);
+            g_ort_api->ReleaseMemoryInfo(memory_info);
+            return logits; // empty
         }
     }
 
-    // -------------------------------------------------------------------------
-    // 8. Interpret output (DistilBERT for SST-2 yields [batch_size, 2] logits)
-    //    Index 0 -> NEGATIVE, Index 1 -> POSITIVE
-    // -------------------------------------------------------------------------
-    float* logits_data = nullptr;
+    // 5. Extract the logits from the output
     {
-        OrtStatus* status = ort_api->GetTensorMutableData(output_tensor, (void**)&logits_data);
+        float* logits_data = nullptr;
+        OrtStatus* status = g_ort_api->GetTensorMutableData(output_tensor, (void**)&logits_data);
         if (status != nullptr) {
-            std::cerr << "GetTensorMutableData failed: " << ort_api->GetErrorMessage(status) << std::endl;
-            ort_api->ReleaseStatus(status);
+            std::cerr << "GetTensorMutableData failed: "
+                      << g_ort_api->GetErrorMessage(status) << std::endl;
+            g_ort_api->ReleaseStatus(status);
         } else {
-            // Because we only ran a batch of size 1, we expect 2 logits: [logit_neg, logit_pos]
-            float neg_logit = logits_data[0];
-            float pos_logit = logits_data[1];
-            std::cout << "Logits: NEG=" << neg_logit << " | POS=" << pos_logit << std::endl;
-
-            // Decide sentiment by whichever logit is larger
-            if (pos_logit > neg_logit) {
-                std::cout << "Predicted sentiment: POSITIVE" << std::endl;
-            } else {
-                std::cout << "Predicted sentiment: NEGATIVE" << std::endl;
-            }
+            // For DistilBERT on SST-2, shape is [1,2]: [neg_logit, pos_logit]
+            // Copy them into a vector
+            logits.resize(2);
+            logits[0] = logits_data[0];  // negative
+            logits[1] = logits_data[1];  // positive
         }
     }
 
-    // -------------------------------------------------------------------------
-    // 9. Cleanup
-    // -------------------------------------------------------------------------
-    ort_api->ReleaseValue(output_tensor);
-    ort_api->ReleaseValue(attention_mask_ort);
-    ort_api->ReleaseValue(input_ids_ort);
-    ort_api->ReleaseMemoryInfo(memory_info);
+    // Cleanup
+    g_ort_api->ReleaseValue(output_tensor);
+    g_ort_api->ReleaseValue(attention_mask_ort);
+    g_ort_api->ReleaseValue(input_ids_ort);
+    g_ort_api->ReleaseMemoryInfo(memory_info);
 
-    ort_api->ReleaseSession(session);
-    ort_api->ReleaseSessionOptions(session_options);
-    ort_api->ReleaseEnv(env);
+    return logits; // either empty if error or 2-element vector
+}
 
-    dlclose(handle);
+int main() {
+    // Initialize
+    if (!initRuntime("libonnxruntime.1.22.0.dylib")) {
+        std::cerr << "initRuntime failed." << std::endl;
+        return 1;
+    }
+
+    // Session options
+    OrtSessionOptions* session_options = createSessionOptions();
+    if (!session_options) {
+        std::cerr << "Failed to create session options." << std::endl;
+        return 1;
+    }
+
+    // Create session
+    OrtSession* session = createSession("model.onnx", session_options);
+    if (!session) {
+        std::cerr << "Failed to create session." << std::endl;
+        g_ort_api->ReleaseSessionOptions(session_options);
+        return 1;
+    }
+
+    // Prepare sample input data for "I think this is wonderful"
+    std::vector<int64_t> input_ids       = {101, 1045, 2228, 2023, 2003, 6919, 102};
+    std::vector<int64_t> attention_mask  = {   1,    1,    1,    1,    1,    1,   1};
+
+    // Run inference
+    std::vector<float> logits = runInference(session, input_ids, attention_mask);
+    if (logits.empty()) {
+        std::cerr << "runInference returned empty logits (error)!\n";
+    } else {
+        float neg_logit = logits[0];
+        float pos_logit = logits[1];
+        std::cout << "Logits: NEG=" << neg_logit << " | POS=" << pos_logit << std::endl;
+
+        // Choose sentiment
+        std::string sentiment = (pos_logit > neg_logit) ? "POSITIVE" : "NEGATIVE";
+        std::cout << "Predicted sentiment: " << sentiment << std::endl;
+    }
+
+    // Cleanup
+    g_ort_api->ReleaseSession(session);
+    g_ort_api->ReleaseSessionOptions(session_options);
+    g_ort_api->ReleaseEnv(g_env);
+    dlclose(g_handle);
 
     std::cout << "Done." << std::endl;
     return 0;
