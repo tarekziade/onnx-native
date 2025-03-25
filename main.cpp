@@ -103,99 +103,108 @@ OrtSession* createSession(const char* model_path, OrtSessionOptions* session_opt
     return session;
 }
 
-//------------------------------------------------------------------------------
-// Helper to retrieve all input names
-//------------------------------------------------------------------------------
-std::vector<std::string> getInputNames(OrtSession* session) {
-    std::vector<std::string> names;
-    if (!session) return names;
+#include <iostream>
+#include <vector>
+#include <string>
+#include <dlfcn.h>
+#include "onnxruntime_c_api.h"
 
+// Forward declare your global variables or use them as needed
+extern const OrtApi* g_ort_api;  // Typically retrieved from initRuntime(...)
+extern OrtEnv* g_env;            // Also created by initRuntime(...)
+
+/**
+ * @brief Retrieves all input and output names in a single call.
+ *
+ * @param session A valid OrtSession* for your loaded model.
+ * @return A pair {input_names, output_names}.
+ */
+std::pair<std::vector<std::string>, std::vector<std::string>>
+getModelInputOutputNames(OrtSession* session)
+{
+    std::vector<std::string> input_names;
+    std::vector<std::string> output_names;
+
+    if (!session) {
+        std::cerr << "[getModelInputOutputNames] session is null.\n";
+        return {input_names, output_names};
+    }
+
+    // 1) Get input count
     size_t num_input_nodes = 0;
-    OrtStatus* status = g_ort_api->SessionGetInputCount(session, &num_input_nodes);
-    if (status != nullptr) {
-        std::cerr << "SessionGetInputCount failed: "
-                  << g_ort_api->GetErrorMessage(status) << std::endl;
-        g_ort_api->ReleaseStatus(status);
-        return names;
+    {
+        OrtStatus* status = g_ort_api->SessionGetInputCount(session, &num_input_nodes);
+        if (status != nullptr) {
+            std::cerr << "SessionGetInputCount failed: "
+                      << g_ort_api->GetErrorMessage(status) << std::endl;
+            g_ort_api->ReleaseStatus(status);
+            return {input_names, output_names};
+        }
     }
 
-    // Create default allocator
+    // 2) Get output count
+    size_t num_output_nodes = 0;
+    {
+        OrtStatus* status = g_ort_api->SessionGetOutputCount(session, &num_output_nodes);
+        if (status != nullptr) {
+            std::cerr << "SessionGetOutputCount failed: "
+                      << g_ort_api->GetErrorMessage(status) << std::endl;
+            g_ort_api->ReleaseStatus(status);
+            return {input_names, output_names};
+        }
+    }
+
+    // 3) Create default allocator (used when retrieving names)
     OrtAllocator* allocator = nullptr;
-    status = g_ort_api->GetAllocatorWithDefaultOptions(&allocator);
-    if (status != nullptr) {
-        std::cerr << "GetAllocatorWithDefaultOptions failed: "
-                  << g_ort_api->GetErrorMessage(status) << std::endl;
-        g_ort_api->ReleaseStatus(status);
-        return names;
+    {
+        OrtStatus* status = g_ort_api->GetAllocatorWithDefaultOptions(&allocator);
+        if (status != nullptr) {
+            std::cerr << "GetAllocatorWithDefaultOptions failed: "
+                      << g_ort_api->GetErrorMessage(status) << std::endl;
+            g_ort_api->ReleaseStatus(status);
+            return {input_names, output_names};
+        }
     }
 
-    // Retrieve each input name
-    names.reserve(num_input_nodes);
+    // 4) Retrieve all input names
+    input_names.reserve(num_input_nodes);
     for (size_t i = 0; i < num_input_nodes; i++) {
-        char* input_name = nullptr;
-        status = g_ort_api->SessionGetInputName(session, i, allocator, &input_name);
+        char* name = nullptr;
+        OrtStatus* status = g_ort_api->SessionGetInputName(session, i, allocator, &name);
         if (status != nullptr) {
             std::cerr << "SessionGetInputName failed: "
                       << g_ort_api->GetErrorMessage(status) << std::endl;
             g_ort_api->ReleaseStatus(status);
             continue;
         }
-        // Copy into a std::string
-        names.emplace_back(input_name);
+        // Convert to std::string
+        input_names.emplace_back(name);
 
-        // Free the char* allocated by ORT
-        g_ort_api->AllocatorFree(allocator, input_name);
+        // Free the raw char* allocated by ORT
+        g_ort_api->AllocatorFree(allocator, name);
     }
 
-    return names;
-}
-
-//------------------------------------------------------------------------------
-// Helper to retrieve all output names
-//------------------------------------------------------------------------------
-std::vector<std::string> getOutputNames(OrtSession* session) {
-    std::vector<std::string> names;
-    if (!session) return names;
-
-    size_t num_output_nodes = 0;
-    OrtStatus* status = g_ort_api->SessionGetOutputCount(session, &num_output_nodes);
-    if (status != nullptr) {
-        std::cerr << "SessionGetOutputCount failed: "
-                  << g_ort_api->GetErrorMessage(status) << std::endl;
-        g_ort_api->ReleaseStatus(status);
-        return names;
-    }
-
-    // Create default allocator
-    OrtAllocator* allocator = nullptr;
-    status = g_ort_api->GetAllocatorWithDefaultOptions(&allocator);
-    if (status != nullptr) {
-        std::cerr << "GetAllocatorWithDefaultOptions failed: "
-                  << g_ort_api->GetErrorMessage(status) << std::endl;
-        g_ort_api->ReleaseStatus(status);
-        return names;
-    }
-
-    // Retrieve each output name
-    names.reserve(num_output_nodes);
+    // 5) Retrieve all output names
+    output_names.reserve(num_output_nodes);
     for (size_t i = 0; i < num_output_nodes; i++) {
-        char* output_name = nullptr;
-        status = g_ort_api->SessionGetOutputName(session, i, allocator, &output_name);
+        char* name = nullptr;
+        OrtStatus* status = g_ort_api->SessionGetOutputName(session, i, allocator, &name);
         if (status != nullptr) {
             std::cerr << "SessionGetOutputName failed: "
                       << g_ort_api->GetErrorMessage(status) << std::endl;
             g_ort_api->ReleaseStatus(status);
             continue;
         }
-        // Copy into a std::string
-        names.emplace_back(output_name);
+        // Convert to std::string
+        output_names.emplace_back(name);
 
-        // Free the char* allocated by ORT
-        g_ort_api->AllocatorFree(allocator, output_name);
+        // Free the raw char* allocated by ORT
+        g_ort_api->AllocatorFree(allocator, name);
     }
 
-    return names;
+    return {input_names, output_names};
 }
+
 
 //------------------------------------------------------------------------------
 // 4) Runs inference given a session, discovered input/output names,
@@ -365,8 +374,8 @@ int main() {
     }
 
     // 4) Discover the input/output names from the model
-    std::vector<std::string> input_names  = getInputNames(session);
-    std::vector<std::string> output_names = getOutputNames(session);
+    auto [input_names, output_names] = getModelInputOutputNames(session);
+
 
     std::cout << "Discovered " << input_names.size() << " input(s):\n";
     for (auto& nm : input_names)
