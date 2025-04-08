@@ -65,6 +65,7 @@ $PYTHON tools/ci_build/build.py \
   --disable_exceptions \
   --update \
   --config Release \
+  --cmake_extra_defines CMAKE_EXPORT_COMPILE_COMMANDS=ON \
   "$@"
 
 #######################################
