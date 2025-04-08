@@ -55,16 +55,17 @@ fi
 #######################################
 $PYTHON tools/ci_build/build.py \
   --build_dir "$BUILD_DIR" \
+  --build_shared_lib \
   --parallel \
   --skip_submodule_sync \
   --disable_rtti \
   --allow_running_as_root \
   --use_lock_free_queue \
   --skip_tests \
-  --build_shared_lib \
   --disable_exceptions \
   --update \
   --config Release \
+  --compile_no_warning_as_error \
   --cmake_extra_defines CMAKE_EXPORT_COMPILE_COMMANDS=ON \
   "$@"
 

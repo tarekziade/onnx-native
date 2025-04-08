@@ -34,4 +34,4 @@ clean:
 .PHONY: docker
 docker:
 	docker buildx build --platform=linux/amd64 -t onnxruntime-linux .
-	docker run --rm -it --platform=linux/amd64 -v $(pwd):/workspace onnxruntime-linux ./build.sh
+	docker run --rm -it --platform=linux/amd64 -v $(shell pwd):/workspace onnxruntime-linux ./build.sh

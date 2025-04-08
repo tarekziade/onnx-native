@@ -18,7 +18,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libgdbm-dev \
   uuid-dev \
   libbz2-dev \
-  clang \
   git \
   libprotobuf-dev \
   protobuf-compiler \
