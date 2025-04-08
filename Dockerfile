@@ -49,14 +49,20 @@ RUN wget --no-check-certificate https://www.python.org/ftp/python/3.12.0/Python-
   && cd .. \
   && rm -rf Python-3.12.0 Python-3.12.0.tgz
 
-# 6) Optional: symlink python3 => python3.12
-RUN ln -sf /usr/local/bin/python3.12 /usr/bin/python3
+ENV USE_SYSTEM_PYTHON=/usr/local/bin/python3.12
 
-ENV USE_SYSTEM_PYTHON=/usr/bin/python3
+RUN apt-get update && apt-get install -y lsb-release software-properties-common gnupg
+
+RUN wget --no-check-certificate -qO- https://apt.llvm.org/llvm.sh | bash -s -- 18
+RUN clang-18 --version
+
+RUN wget --no-check-certificate https://bootstrap.pypa.io/get-pip.py
+RUN /usr/local/bin/python3.12 get-pip.py
+
 
 # Set clang as default compiler
-ENV CC=clang
-ENV CXX=clang++
+ENV CC=clang-18
+ENV CXX=clang++-18
 
 WORKDIR /workspace
 CMD ["/bin/bash"]

@@ -55,6 +55,8 @@ fi
 #######################################
 $PYTHON tools/ci_build/build.py \
   --build_dir "$BUILD_DIR" \
+  --update \
+  --build \
   --build_shared_lib \
   --parallel \
   --skip_submodule_sync \
@@ -63,7 +65,6 @@ $PYTHON tools/ci_build/build.py \
   --use_lock_free_queue \
   --skip_tests \
   --disable_exceptions \
-  --update \
   --config Release \
   --compile_no_warning_as_error \
   --cmake_extra_defines CMAKE_EXPORT_COMPILE_COMMANDS=ON \
