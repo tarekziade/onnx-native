@@ -7,6 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
   wget \
   tar \
+  clang \
   build-essential \
   zlib1g-dev \
   libssl-dev \
