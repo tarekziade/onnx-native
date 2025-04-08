@@ -1,11 +1,74 @@
-#!/bin/bash -xe
+#!/usr/bin/env bash
+set -e
 
-[ -d onnxruntime/ ] || git clone --recursive https://github.com/Microsoft/onnxruntime.git
+#######################################
+# 1) Detect platform & set variables
+#######################################
+OS_TYPE="$(uname -s)"
+if [[ "$OS_TYPE" == "Darwin" ]]; then
+  BUILD_DIR="build/MacOS"
+  LIB_EXT="dylib"
+  PROTOC_PATH="/usr/local/bin/protoc" # Example path for macOS (adjust if needed)
+else
+  BUILD_DIR="build/Linux"
+  LIB_EXT="so"
+  PROTOC_PATH="/usr/bin/protoc"
+fi
+
+#######################################
+# 2) Clone the repo if missing
+#######################################
+if [ ! -d onnxruntime ]; then
+  echo "No local onnxruntime directory found; cloning..."
+  git clone --recursive https://github.com/Microsoft/onnxruntime.git
+fi
+
 cd onnxruntime
-python3 -m venv .
-. bin/activate
-pip install -r requirements-dev.txt
-BUILD_TYPE=Release
-# CMAKE_OSX_ARCHITECTURES is ignored on non-macOS
-python tools/ci_build/build.py --build_dir build/ --config $BUILD_TYPE --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --cmake_extra_defines CMAKE_OSX_ARCHITECTURES=arm64 --disable_exceptions --disable_rtti --skip_tests
-cp build/$BUILD_TYPE/libonnxruntime.so.1.22.0 ../libonnxruntime.so
+mkdir -p "$BUILD_DIR"
+
+#######################################
+# 3) Decide: create venv or use system
+#######################################
+if [ -z "$USE_SYSTEM_PYTHON" ]; then
+  # Default: create/use local venv for building outside Docker
+  echo "Creating venv in .env folder..."
+  if [ ! -d .env ]; then
+    python3 -m venv .env
+  fi
+  source .env/bin/activate
+
+  # Optionally upgrade pip
+  pip install --upgrade pip
+  pip install -r ../requirements-dev.txt
+  PYTHON="python"
+else
+  # Docker path: skip venv, use system python
+  echo "Using system Python instead of venv..."
+  $USE_SYSTEM_PYTHON -m pip install --upgrade pip
+  $USE_SYSTEM_PYTHON -m pip install -r ../requirements-dev.txt
+  PYTHON="$USE_SYSTEM_PYTHON"
+fi
+
+#######################################
+# 4) Build onnxruntime
+#    (Pass additional flags from script args: "$@")
+#######################################
+$PYTHON tools/ci_build/build.py \
+  --build_dir "$BUILD_DIR" \
+  --parallel \
+  --skip_submodule_sync \
+  --disable_rtti \
+  --allow_running_as_root \
+  --use_lock_free_queue \
+  --skip_tests \
+  --build_shared_lib \
+  --disable_exceptions \
+  --update \
+  --config Release \
+  "$@"
+
+#######################################
+# 5) Copy out the final library
+#    (macOS => .dylib, Linux => .so)
+#######################################
+cp "$BUILD_DIR"/Release/libonnxruntime.*"$LIB_EXT"* ../
