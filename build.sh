@@ -15,6 +15,8 @@ else
   PROTOC_PATH="/usr/bin/protoc"
 fi
 
+BUILD_CONFIG="MinSizeRel"
+
 #######################################
 # 2) Clone the repo if missing
 #######################################
@@ -24,6 +26,7 @@ if [ ! -d onnxruntime ]; then
 fi
 
 cd onnxruntime
+git checkout 89f8206ba4
 mkdir -p "$BUILD_DIR"
 
 #######################################
@@ -61,17 +64,21 @@ $PYTHON tools/ci_build/build.py \
   --parallel \
   --skip_submodule_sync \
   --disable_rtti \
-  --allow_running_as_root \
-  --use_lock_free_queue \
-  --skip_tests \
-  --disable_exceptions \
-  --config Release \
+  --enable_lto \
+  --use_lock_free_queue --skip_tests \
+  --config "$BUILD_CONFIG" \
   --compile_no_warning_as_error \
-  --cmake_extra_defines CMAKE_EXPORT_COMPILE_COMMANDS=ON \
-  "$@"
+  --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF \
+  --cmake_extra_defines ONNX_USE_LITE_PROTO=ON \
+  --cmake_extra_defines CMAKE_EXPORT_COMPILE_COMMANDS=ON
+"$@"
+
+#--path_to_protoc_exe /opt/homebrew/bin/protoc
 
 #######################################
 # 5) Copy out the final library
 #    (macOS => .dylib, Linux => .so)
 #######################################
-cp "$BUILD_DIR"/Release/libonnxruntime.*"$LIB_EXT"* ../
+cp "$BUILD_DIR"/"$BUILD_CONFIG"/libonnxruntime.*"$LIB_EXT"* ../
+
+strip -x ../libonnxruntime.*

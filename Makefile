@@ -28,7 +28,7 @@ run: model.onnx onnx_test
 .PHONY: clean
 clean:
 	@echo "Cleaning up..."
-	@rm -f onnx_test model.onnx libonnxruntime.1.22.0.dylib
+	@rm -f onnx_test model.onnx libonnxruntime.*
 
 # build for Ubuntu 18.04
 .PHONY: docker

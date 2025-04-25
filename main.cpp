@@ -1,11 +1,12 @@
-
 #include <iostream>
 #include <vector>
 #include <string>
+#include <numeric>   // for std::accumulate
+#include <chrono>    // for timing
 #include <dlfcn.h>
 #include "onnxruntime_c_api.h"
 
-// Global variables (as in your example)
+// Global variables
 static void* g_handle = nullptr;
 static const OrtApi* g_ort_api = nullptr;
 static OrtEnv* g_env = nullptr;
@@ -103,22 +104,9 @@ OrtSession* createSession(const char* model_path, OrtSessionOptions* session_opt
     return session;
 }
 
-#include <iostream>
-#include <vector>
-#include <string>
-#include <dlfcn.h>
-#include "onnxruntime_c_api.h"
-
-// Forward declare your global variables or use them as needed
-extern const OrtApi* g_ort_api;  // Typically retrieved from initRuntime(...)
-extern OrtEnv* g_env;            // Also created by initRuntime(...)
-
-/**
- * @brief Retrieves all input and output names in a single call.
- *
- * @param session A valid OrtSession* for your loaded model.
- * @return A pair {input_names, output_names}.
- */
+//------------------------------------------------------------------------------
+// 4) Retrieve model input/output names
+//------------------------------------------------------------------------------
 std::pair<std::vector<std::string>, std::vector<std::string>>
 getModelInputOutputNames(OrtSession* session)
 {
@@ -154,7 +142,7 @@ getModelInputOutputNames(OrtSession* session)
         }
     }
 
-    // 3) Create default allocator (used when retrieving names)
+    // 3) Create default allocator
     OrtAllocator* allocator = nullptr;
     {
         OrtStatus* status = g_ort_api->GetAllocatorWithDefaultOptions(&allocator);
@@ -177,10 +165,7 @@ getModelInputOutputNames(OrtSession* session)
             g_ort_api->ReleaseStatus(status);
             continue;
         }
-        // Convert to std::string
         input_names.emplace_back(name);
-
-        // Free the raw char* allocated by ORT
         g_ort_api->AllocatorFree(allocator, name);
     }
 
@@ -195,25 +180,20 @@ getModelInputOutputNames(OrtSession* session)
             g_ort_api->ReleaseStatus(status);
             continue;
         }
-        // Convert to std::string
         output_names.emplace_back(name);
-
-        // Free the raw char* allocated by ORT
         g_ort_api->AllocatorFree(allocator, name);
     }
 
     return {input_names, output_names};
 }
 
-
 //------------------------------------------------------------------------------
-// 4) Runs inference given a session, discovered input/output names,
-//    and sample data (two inputs).
+// 5) Run inference
 //------------------------------------------------------------------------------
 std::vector<float> runInference(
     OrtSession* session,
-    const std::vector<std::string>& input_names,  // e.g. [ "input_ids", "attention_mask" ]
-    const std::vector<std::string>& output_names, // e.g. [ "logits" ]
+    const std::vector<std::string>& input_names,
+    const std::vector<std::string>& output_names,
     const std::vector<int64_t>& input_ids,
     const std::vector<int64_t>& attention_mask)
 {
@@ -290,11 +270,8 @@ std::vector<float> runInference(
     }
 
     // 4. Run the session
-    // Convert std::string -> const char* for the two input names
     const char* input_name_array[2] = { input_names[0].c_str(), input_names[1].c_str() };
     const OrtValue* input_values[2] = { input_ids_ort, attention_mask_ort };
-
-    // We'll assume there's exactly 1 output; you can adapt if there's more
     const char* output_name_array[1] = { output_names[0].c_str() };
 
     OrtValue* output_tensor = nullptr;
@@ -331,8 +308,6 @@ std::vector<float> runInference(
                       << g_ort_api->GetErrorMessage(status) << std::endl;
             g_ort_api->ReleaseStatus(status);
         } else {
-            // For DistilBERT on SST-2, shape [1, 2]: [neg_logit, pos_logit]
-            // We'll just copy the first 2 entries (or adapt to the correct shape in a real scenario).
             logits.resize(2);
             logits[0] = output_data[0];
             logits[1] = output_data[1];
@@ -348,12 +323,9 @@ std::vector<float> runInference(
     return logits; // either empty or [neg_logit, pos_logit]
 }
 
-//------------------------------------------------------------------------------
-// main
-//------------------------------------------------------------------------------
 int main() {
-    // 1) Load the ONNX Runtime library and create global Env
-    if (!initRuntime("libonnxruntime.1.22.0.dylib")) {
+    // 1) Load the ONNX Runtime library and create Env
+    if (!initRuntime("libonnxruntime.dylib")) {
         std::cerr << "initRuntime failed.\n";
         return 1;
     }
@@ -376,35 +348,65 @@ int main() {
     // 4) Discover the input/output names from the model
     auto [input_names, output_names] = getModelInputOutputNames(session);
 
-
     std::cout << "Discovered " << input_names.size() << " input(s):\n";
-    for (auto& nm : input_names)
+    for (auto& nm : input_names) {
         std::cout << "  " << nm << "\n";
+    }
 
     std::cout << "Discovered " << output_names.size() << " output(s):\n";
-    for (auto& nm : output_names)
+    for (auto& nm : output_names) {
         std::cout << "  " << nm << "\n";
+    }
 
     // Prepare sample input data: "I think this is wonderful"
-    // (IDs correspond to a DistilBERT tokenizer for demonstration)
+    // (IDs correspond to a DistilBERT tokenizer, for demonstration)
     std::vector<int64_t> input_ids      = {101, 1045, 2228, 2023, 2003, 6919, 102};
     std::vector<int64_t> attention_mask = {   1,    1,    1,    1,    1,    1,   1};
 
-    // 5) Run inference using the discovered names
-    std::vector<float> logits = runInference(session, input_names, output_names, input_ids, attention_mask);
-    if (logits.empty()) {
-        std::cerr << "runInference returned empty logits (error).\n";
-    } else {
-        float neg_logit = logits[0];
-        float pos_logit = logits[1];
-        std::cout << "Logits: NEG=" << neg_logit << " | POS=" << pos_logit << std::endl;
+    // We'll run the inference 25 times and measure durations
+    const size_t NUM_RUNS = 25;
+    std::vector<double> timings(NUM_RUNS, 0.0);
 
-        // Choose sentiment
-        std::string sentiment = (pos_logit > neg_logit) ? "POSITIVE" : "NEGATIVE";
-        std::cout << "Predicted sentiment: " << sentiment << std::endl;
+    // Loop 25 times
+    for (size_t i = 0; i < NUM_RUNS; ++i) {
+        auto start_time = std::chrono::high_resolution_clock::now();
+
+        std::vector<float> logits = runInference(session, input_names, output_names, input_ids, attention_mask);
+
+        auto end_time = std::chrono::high_resolution_clock::now();
+        double elapsed_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+
+        timings[i] = elapsed_ms;
+
+        // For debugging, you might print an example result each time:
+        if (!logits.empty()) {
+            float neg_logit = logits[0];
+            float pos_logit = logits[1];
+            std::string sentiment = (pos_logit > neg_logit) ? "POSITIVE" : "NEGATIVE";
+            std::cout << "Run #" << (i + 1) << ": NEG=" << neg_logit
+                      << ", POS=" << pos_logit
+                      << ", sentiment=" << sentiment
+                      << ", time=" << elapsed_ms << " ms\n";
+        } else {
+            std::cerr << "Run #" << (i + 1) << ": runInference returned empty logits.\n";
+        }
     }
 
-    // Cleanup session, options, env, and dynamic library
+    // Compute some performance statistics
+    double sum_time = std::accumulate(timings.begin(), timings.end(), 0.0);
+    double avg_time = sum_time / static_cast<double>(NUM_RUNS);
+
+    // Find min and max
+    auto minmax = std::minmax_element(timings.begin(), timings.end());
+    double min_time = *minmax.first;
+    double max_time = *minmax.second;
+
+    std::cout << "\nPerformance over " << NUM_RUNS << " runs:\n";
+    std::cout << "  Average time: " << avg_time << " ms\n";
+    std::cout << "  Min time:     " << min_time << " ms\n";
+    std::cout << "  Max time:     " << max_time << " ms\n";
+
+    // Cleanup
     g_ort_api->ReleaseSession(session);
     g_ort_api->ReleaseSessionOptions(session_options);
     g_ort_api->ReleaseEnv(g_env);
@@ -413,5 +415,3 @@ int main() {
     std::cout << "Done.\n";
     return 0;
 }
-
-
