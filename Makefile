@@ -19,9 +19,15 @@ onnx_test: main.cpp libonnxruntime.1.22.0.dylib
 	@echo "Building ONNX test..."
 	@clang++ -std=c++17 -o onnx_test main.cpp onnx.pb.cc -ldl -lprotobuf
 
+# Rule to build the program to split a model
+split: split.cpp onnx.pb.cc
+	@echo "Building split program..."
+	@clang++ -std=c++17 -o split split.cpp onnx.pb.cc -lprotobuf
+
 # Rule to run the test with the downloaded ONNX model
-run: model.onnx onnx_test
+run: model.onnx onnx_test split
 	@echo "Running ONNX test..."
+	@./split
 	@./onnx_test
 
 # Clean up generated files
