@@ -4,6 +4,7 @@
 #include <numeric>   // for std::accumulate
 #include <chrono>    // for timing
 #include <dlfcn.h>
+#include <algorithm>
 #include "onnxruntime_c_api.h"
 
 // Global variables
