@@ -6,6 +6,11 @@
 #include <dlfcn.h>
 #include <algorithm>
 #include "onnxruntime_c_api.h"
+#include <iostream>
+#include <fstream>
+
+#include "onnx.pb.h"
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 
 // Global variables
 static void* g_handle = nullptr;
@@ -167,7 +172,7 @@ getModelInputOutputNames(OrtSession* session)
             continue;
         }
         input_names.emplace_back(name);
-        g_ort_api->AllocatorFree(allocator, name);
+        (void)g_ort_api->AllocatorFree(allocator, name);
     }
 
     // 5) Retrieve all output names
@@ -182,7 +187,7 @@ getModelInputOutputNames(OrtSession* session)
             continue;
         }
         output_names.emplace_back(name);
-        g_ort_api->AllocatorFree(allocator, name);
+        (void)g_ort_api->AllocatorFree(allocator, name);
     }
 
     return {input_names, output_names};
@@ -324,25 +329,101 @@ std::vector<float> runInference(
     return logits; // either empty or [neg_logit, pos_logit]
 }
 
+struct AutoTime {
+  AutoTime(const char* str)
+  :start(std::chrono::high_resolution_clock::now())
+  , str(str) { }
+  ~AutoTime() {
+    printf("%s: %0.02lfms\n", str, std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now()-start).count());
+  }
+  std::chrono::time_point<std::chrono::high_resolution_clock> start;
+  const char* str;
+};
+
+bool loadFileToBuffer(const std::string& path, std::vector<char>& buffer) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) return false;
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    buffer.resize(size);
+    return file.read(buffer.data(), size).good();
+}
+
+bool load_external_data_for_model(onnx::ModelProto& model, const std::string& base_dir) {
+    for (auto& tensor : *model.mutable_graph()->mutable_initializer()) {
+        if (tensor.data_location() != onnx::TensorProto_DataLocation_EXTERNAL) continue;
+
+        std::string location;
+        size_t offset = 0, length = 0;
+
+        for (const auto& entry : tensor.external_data()) {
+            if (entry.key() == "location") location = entry.value();
+            else if (entry.key() == "offset") offset = std::stoull(entry.value());
+            else if (entry.key() == "length") length = std::stoull(entry.value());
+        }
+
+        std::ifstream in(base_dir + "/" + location, std::ios::binary);
+        if (!in) {
+            std::cerr << "Failed to open external data file: " << location << "\n";
+            return false;
+        }
+
+        in.seekg(offset);
+        std::string raw_data(length, '\0');
+        in.read(&raw_data[0], length);
+        tensor.set_raw_data(raw_data);
+        tensor.set_data_location(onnx::TensorProto_DataLocation_DEFAULT);
+        tensor.clear_external_data();
+    }
+    return true;
+}
+
 int main() {
-    // 1) Load the ONNX Runtime library and create Env
-    if (!initRuntime("libonnxruntime.dylib")) {
-        std::cerr << "initRuntime failed.\n";
-        return 1;
+  {
+    AutoTime t("dlopen(libonnxruntime)");
+    if (!initRuntime("libonnxruntime.so")) return 1;
+  }
+
+  std::vector<char> graph_buf;
+
+    // Step 1: Load graph.onnx
+    onnx::ModelProto model;
+    {
+      AutoTime t("stream loading graph");
+      std::ifstream in("graph.onnx", std::ios::binary);
+      if (!in || !model.ParseFromIstream(&in)) {
+          std::cerr << "Failed to load graph.onnx\n";
+          return 1;
+      }
     }
 
-    // 2) Create session options
+    {
+      AutoTime t("loading weights");
+      // Step 2: Load external weights from weights.data
+      if (!load_external_data_for_model(model, ".")) {
+          std::cerr << "Failed to load external weights\n";
+          return 1;
+      }
+    }
+
+    std::string model_buf;
+    {
+      AutoTime t("serializing into mem");
+      // Step 3: Serialize full model to memory
+      model_buf = model.SerializeAsString();
+    }
+
+    OrtMemoryInfo* mem_info = nullptr;
+    (void)g_ort_api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &mem_info);
+
+    // Step 4: Create session
     OrtSessionOptions* session_options = createSessionOptions();
-    if (!session_options) {
-        std::cerr << "Failed to create session options.\n";
-        return 1;
-    }
-
-    // 3) Create the session
-    OrtSession* session = createSession("model.onnx", session_options);
-    if (!session) {
-        std::cerr << "Failed to create session.\n";
-        g_ort_api->ReleaseSessionOptions(session_options);
+    OrtSession* session = nullptr;
+    OrtStatus* status = g_ort_api->CreateSessionFromArray(
+        g_env, model_buf.data(), model_buf.size(), session_options, &session);
+    if (status) {
+        std::cerr << "Session creation failed: " << g_ort_api->GetErrorMessage(status) << "\n";
+        g_ort_api->ReleaseStatus(status);
         return 1;
     }
 

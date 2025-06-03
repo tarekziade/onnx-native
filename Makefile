@@ -17,7 +17,7 @@ libonnxruntime.1.22.0.dylib:
 # Rule to build the ONNX test executable
 onnx_test: main.cpp libonnxruntime.1.22.0.dylib
 	@echo "Building ONNX test..."
-	@clang++ -std=c++17 -o onnx_test main.cpp -ldl 
+	@clang++ -std=c++17 -o onnx_test main.cpp onnx.pb.cc -ldl -lprotobuf
 
 # Rule to run the test with the downloaded ONNX model
 run: model.onnx onnx_test
